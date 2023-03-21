@@ -1,0 +1,326 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    kubernetes.io/metadata.name: jianmu
+    name: jianmu
+  name: jianmu
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jianmu-admin
+  namespace: jianmu
+
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: jianmu-admin-cluster-role
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list","create"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: jianmu-admin-cluster-role-binding
+subjects:
+  - kind: ServiceAccount
+    name: jianmu-admin
+    namespace: jianmu
+roleRef:
+  kind: ClusterRole
+  name: jianmu-admin-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jianmu-admin-role
+  namespace: jianmu
+rules:
+- apiGroups: [""]
+  resources: ["*"]
+  verbs: ["*"]
+
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: jianmu-admin-role-binding
+  namespace: jianmu
+subjects:
+  - kind: ServiceAccount
+    name: jianmu-admin
+    namespace: jianmu
+roleRef:
+  kind: Role
+  name: jianmu-admin-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: ci-server
+  name: ci-server
+  namespace: jianmu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ci-server
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: ci-server
+    spec:
+      serviceAccountName: jianmu-admin
+      containers:
+      - command:
+        - wait-for-it.sh
+        - jianmu-mysql:3306
+        - -t
+        - "0"
+        - --
+        - java
+        - -Duser.timezone=Asia/Shanghai
+        - -jar
+        - jianmu-server.jar
+        ports:
+          - containerPort: 8081
+            protocol: TCP
+        env:
+        - name: JIANMU_API_ADMINPASSWD
+          value: "123456"
+        - name: SPRING_DATASOURCE_PASSWORD
+          value: "123456"
+        - name: SPRING_DATASOURCE_URL
+          value: jdbc:mysql://jianmu-mysql:3306/jianmu?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true
+        - name: SPRING_DATASOURCE_USERNAME
+          value: root
+        - name: SPRING_PROFILES_ACTIVE
+          value: dev
+        - name: JIANMU_WORKER_SECRET
+          value: worker-secret
+        - name: JIANMU_WORKER_TYPE
+          value: embedded_kube
+        - name: JIANMU_WORKER_K8S_NAMESPACE
+          value: jianmu
+        image: docker.jianmuhub.com/jianmu/jianmu-server:v2.6.3
+        name: ci-server
+        resources: {}
+        volumeMounts:
+        - mountPath: /home/jianmu/data
+          name: ci-server-claim
+      restartPolicy: Always
+      dnsPolicy: ClusterFirst
+      volumes:
+      - name: ci-server-claim
+        hostPath:
+          path: /jianmu/data
+          type: DirectoryOrCreate
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: web
+  name: web
+  namespace: jianmu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+      - image: docker.jianmuhub.com/jianmu/jianmu-ui:v2.6.3
+        name: web
+        ports:
+        - containerPort: 80
+          protocol: TCP
+        - containerPort: 443
+          protocol: TCP
+        resources: {}
+      restartPolicy: Always
+      dnsPolicy: ClusterFirst
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: jianmu-mysql
+  name: jianmu-mysql
+  namespace: jianmu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jianmu-mysql
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: jianmu-mysql
+    spec:
+      containers:
+      - args:
+        - --init-connect=SET NAMES utf8
+        - --character-set-server=utf8mb4
+        - --collation-server=utf8mb4_unicode_ci
+        - --max-connections=1200
+        - --max-user-connections=1000
+        env:
+        - name: MYSQL_DATABASE
+          value: jianmu
+        - name: MYSQL_ROOT_PASSWORD
+          value: "123456"
+        - name: TZ
+          value: Asia/Shanghai
+        image: docker.jianmuhub.com/library/mysql:8.0.31
+        name: jianmu-mysql
+        ports:
+        - containerPort: 3306
+          protocol: TCP
+        resources: {}
+        volumeMounts:
+        - mountPath: /var/lib/mysql
+          name: mysql-claim
+      restartPolicy: Always
+      dnsPolicy: ClusterFirst
+      volumes:
+      - name: mysql-claim
+        hostPath:
+          path: /jianmu/mysql
+          type: DirectoryOrCreate
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: kube-worker
+  name: kube-worker
+  namespace: jianmu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kube-worker
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: kube-worker
+    spec:
+      serviceAccountName: jianmu-admin
+      containers:
+      - env:
+        - name: JIANMU_SRV_ADDRESS
+          value: "http://ci-server:8081"
+        - name: JIANMU_SRV_SECRET
+          value: "worker-secret"
+        - name: JIANMU_WORKER_ID
+          value: "kube-worker01"
+        - name: JIANMU_KUBERNETES_NAMESPACE
+          value: jianmu
+        - name: JIANMU_DEBUG
+          value: "true"
+        - name: JIANMU_WORKER_CAPACITY
+          value: "5"
+        image: docker.jianmuhub.com/jianmu/jianmu-worker-kube:1.0.3
+        name: kube-worker
+        resources: {}
+      restartPolicy: Always
+      dnsPolicy: ClusterFirst
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: ci-server
+  name: ci-server
+  namespace: jianmu
+spec:
+  ports:
+  - name: ci-server-port
+    protocol: TCP
+    port: 8081
+    targetPort: 8081
+    nodePort: 30181
+  selector:
+    app: ci-server
+  type: NodePort
+  sessionAffinity: ClientIP
+  externalTrafficPolicy: Cluster
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: web
+  name: web
+  namespace: jianmu
+spec:
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 80
+      nodePort: 30180
+  selector:
+    app: web
+  type: NodePort
+  sessionAffinity: ClientIP
+  externalTrafficPolicy: Cluster
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: jianmu-mysql
+  name: jianmu-mysql
+  namespace: jianmu
+spec:
+  ports:
+  - name: mysql-port
+    protocol: TCP
+    port: 3306
+    targetPort: 3306
+    nodePort: 30306
+  type: NodePort
+  selector:
+    app: jianmu-mysql
